@@ -22,12 +22,12 @@
 
 ---
 
-## Phase 1: Environment Setup & Familiarization
+## Phase 1: Environment Setup & Familiarization ✅ COMPLETED
 
 ### 1.1 Development Environment
 
-- [ ] Set up Python virtual environment
-- [ ] Install required dependencies:
+- [x] Set up Python virtual environment
+- [x] Install required dependencies:
   ```
   langchain==0.3.*
   langchain_openai==0.3.*
@@ -37,24 +37,24 @@
   websockets==15.0.*
   tiktoken
   ```
-- [ ] Configure OpenAI API key in environment variables
-- [ ] Test basic LangChain/LangGraph connectivity
+- [x] Configure OpenAI API key in environment variables
+- [x] Test basic LangChain/LangGraph connectivity
 
 ### 1.2 Ticketing System Setup
 
-- [ ] Navigate to `GAI-3101-CAP-1-GAI-3101-CAP-1764171407/LabFiles/capstone/ticketing-system/`
-- [ ] Run `npm install` to install Node.js dependencies
-- [ ] Start the ticketing system with `npm run dev`
-- [ ] Access the UI at `http://localhost:3000` (or configured port)
-- [ ] Review the Swagger documentation at `/api/docs`
-- [ ] Familiarize with the OpenAPI spec at `/api/docs/openapi.json`
+- [x] Navigate to `GAI-3101-CAP-1-GAI-3101-CAP-1764171407/LabFiles/capstone/ticketing-system/`
+- [x] Run `npm install` to install Node.js dependencies
+- [x] Start the ticketing system with `npm run dev`
+- [x] Access the UI at `http://localhost:3000` (or configured port)
+- [x] Review the Swagger documentation at `/api/docs`
+- [x] Familiarize with the OpenAPI spec at `/api/docs/openapi.json`
 
 ### 1.3 Review Existing Resources
 
-- [ ] Study `basic-ticket-agent.ipynb` - the starter notebook with key patterns
-- [ ] Study `LangChain_LangGraph_Chatbot_Template.py` - template for LangGraph workflows
-- [ ] Review all 7 support documentation files in `support-info/` folder
-- [ ] Examine sample tickets in `tickets.json` to understand data format
+- [x] Study `basic-ticket-agent.ipynb` - the starter notebook with key patterns
+- [x] Study `LangChain_LangGraph_Chatbot_Template.py` - template for LangGraph workflows
+- [x] Review all 7 support documentation files in `support-info/` folder
+- [x] Examine sample tickets in `tickets.json` to understand data format
 
 ---
 
@@ -447,14 +447,118 @@ Using the provided PowerPoint template (`CapstoneMisc/BAH Team Presentation Temp
 
 ---
 
+## Where to Develop the Agent Code
+
+### Recommended Project Structure
+
+Create your agent code in the capstone folder alongside the ticketing system:
+
+```
+GAI-3101-CAP-1-GAI-3101-CAP-1764171407/
+└── LabFiles/
+    └── capstone/
+        ├── ticketing-system/          # Existing - Node.js backend (DO NOT MODIFY)
+        ├── support-info/              # Existing - RAG knowledge base (DO NOT MODIFY)
+        ├── basic-ticket-agent.ipynb   # Existing - Starter code reference
+        │
+        ├── beanbotics_agent/          # 👈 CREATE THIS - Your Python agent package
+        │   ├── __init__.py
+        │   ├── agent.py               # Main LangGraph workflow definition
+        │   ├── state.py               # State schema (TypedDict)
+        │   ├── nodes/                 # Individual workflow nodes
+        │   │   ├── __init__.py
+        │   │   ├── fetch_tickets.py
+        │   │   ├── classify.py
+        │   │   ├── prioritize.py
+        │   │   └── update_ticket.py
+        │   ├── prompts/               # LLM prompts
+        │   │   ├── classification.py
+        │   │   └── priority.py
+        │   └── rag/                   # RAG components (optional)
+        │       ├── __init__.py
+        │       └── retriever.py
+        │
+        ├── main.py                    # 👈 CREATE THIS - Entry point to run the agent
+        ├── requirements.txt           # 👈 CREATE THIS - Python dependencies
+        └── tests/                     # 👈 CREATE THIS - Test files
+            └── test_classification.py
+```
+
+### Alternative: Single-File Approach
+
+For a simpler approach, you can develop everything in a single Python file:
+
+```
+GAI-3101-CAP-1-GAI-3101-CAP-1764171407/
+└── LabFiles/
+    └── capstone/
+        ├── ticketing-system/          # Existing
+        ├── support-info/              # Existing
+        ├── basic-ticket-agent.ipynb   # Existing reference
+        │
+        ├── beanbotics_agent.py        # 👈 CREATE THIS - All agent code in one file
+        └── requirements.txt           # 👈 CREATE THIS - Python dependencies
+```
+
+### Using the Starter Notebook as a Base
+
+You can also extend the existing `basic-ticket-agent.ipynb` notebook, but for a production-ready agent, a standalone Python file is recommended. The notebook contains working examples of:
+
+1. **WebSocket connection** - See the `listen_for_ticket_updates()` function
+2. **OpenAPI agent setup** - See the `planner.create_openapi_agent()` call
+3. **RAG vector store** - See the `InMemoryVectorStore` example
+
+### Key Code Patterns from Starter Resources
+
+**From `basic-ticket-agent.ipynb`:**
+```python
+# API Integration
+from langchain_community.agent_toolkits.openapi import planner
+from langchain_community.utilities.requests import RequestsWrapper
+
+agent = planner.create_openapi_agent(
+    api_spec=openapi_spec,
+    requests_wrapper=RequestsWrapper(),
+    llm=ChatOpenAI(model_name="gpt-4o", temperature=0.0),
+    allow_dangerous_requests=True,
+    allow_operations=['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
+)
+```
+
+**From `LangChain_LangGraph_Chatbot_Template.py`:**
+```python
+# State Management with LangGraph
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph, START, END
+
+class AgentState(TypedDict):
+    ticket_id: str
+    category: str
+    priority: str
+    # ... add more fields
+
+workflow = StateGraph(state_schema=AgentState)
+workflow.add_node("classify", classify_ticket)
+workflow.add_edge(START, "classify")
+# ... build your graph
+```
+
+---
+
 ## Next Steps
 
-1. Schedule team meeting to review this plan
-2. Assign roles and responsibilities
-3. Set up shared development environment
-4. Begin Phase 1 tasks
-5. Create a shared task board (Trello, GitHub Projects, etc.) to track progress
+**Phase 1 is complete.** To continue:
+
+1. ~~Schedule team meeting to review this plan~~ → Done
+2. ~~Assign roles and responsibilities~~ → Done
+3. ~~Set up shared development environment~~ → Done
+4. ~~Begin Phase 1 tasks~~ → ✅ Complete
+5. **BEGIN PHASE 2: Create the agent state schema and workflow design**
+   - Create `beanbotics_agent.py` (or the package structure) in the capstone folder
+   - Define the `AgentState` TypedDict
+   - Implement the LangGraph workflow nodes
 
 ---
 
 *Plan created: December 2024*
+*Updated: December 2024 - Phase 1 marked complete*

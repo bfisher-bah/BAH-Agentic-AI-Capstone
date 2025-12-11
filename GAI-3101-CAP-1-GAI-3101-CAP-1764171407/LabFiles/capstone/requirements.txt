@@ -1,0 +1,9 @@
+# BeanBotics Support Agent - Dependencies
+langchain==0.3.*
+langchain_openai==0.3.*
+langchain_community
+langgraph==0.4.*
+websockets==15.0.*
+tiktoken
+requests
+python-dotenv
