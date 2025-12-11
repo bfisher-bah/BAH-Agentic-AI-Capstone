@@ -40,7 +40,7 @@ from typing import TypedDict, Optional, List
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.document_loaders import DirectoryLoader
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_core.vectorstores import InMemoryVectorStore
 from langgraph.graph import StateGraph, START, END
 
@@ -229,9 +229,12 @@ def get_retriever():
 
         try:
             # Load all markdown files from support-info directory
+            # Use TextLoader instead of default UnstructuredLoader to avoid unstructured dependency
             loader = DirectoryLoader(
                 str(SUPPORT_DOCS_PATH),
                 glob="**/*.md",
+                loader_cls=TextLoader,
+                loader_kwargs={"encoding": "utf-8"},
                 show_progress=False
             )
             docs = loader.load()
