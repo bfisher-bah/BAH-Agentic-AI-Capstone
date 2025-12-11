@@ -1,27 +1,38 @@
 """
-BeanBotics Support Agent - MVP
+BeanBotics Support Agent
 An automated ticket classification and processing system for BeanBotics Inc.
 
 This agent:
 1. Fetches unprocessed tickets from the ticketing system API
 2. Classifies tickets into categories (Mechanical, Quality, Maintenance, etc.)
 3. Assigns priority levels (High, Medium, Low)
-4. Updates tickets in the system via API
+4. Extracts serial numbers from ticket descriptions
+5. Updates tickets in the system via API
+
+Modes:
+    - Batch mode: Process all unprocessed tickets once and exit
+    - WebSocket mode: Listen for new tickets in real-time and process them as they arrive
 
 Usage:
-    # From command line:
+    # Batch mode (default):
     python beanbotics_agent.py
 
+    # WebSocket real-time mode:
+    python beanbotics_agent.py --watch
+
     # From Jupyter/SageMaker:
-    from beanbotics_agent import run_agent
-    run_agent()
+    from beanbotics_agent import run_agent, run_agent_websocket
+    run_agent()  # Batch mode
+    await run_agent_websocket()  # Real-time mode
 
 Configuration:
     Edit secrets.env with your OpenAI API key and other settings.
 """
 
 import os
+import re
 import json
+import asyncio
 import requests
 from pathlib import Path
 from typing import TypedDict, Optional, List
@@ -29,6 +40,13 @@ from typing import TypedDict, Optional, List
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
+
+# WebSocket import (optional, for real-time mode)
+try:
+    import websockets
+    WEBSOCKETS_AVAILABLE = True
+except ImportError:
+    WEBSOCKETS_AVAILABLE = False
 
 # Load environment variables from secrets.env
 secrets_path = Path(__file__).parent / "secrets.env"
@@ -83,10 +101,48 @@ class AgentState(TypedDict):
     classified_category: Optional[str]
     # Priority result
     assigned_priority: Optional[str]
+    # Extracted serial number
+    extracted_serial: Optional[str]
     # Processing log
     log: List[str]
     # Error tracking
     errors: List[str]
+
+
+# =============================================================================
+# Serial Number Extraction
+# =============================================================================
+
+# Common serial number patterns for Bean Machine
+# Examples: BM-1001, BM-2345, BM1001, etc.
+SERIAL_PATTERNS = [
+    r'\bBM-?\d{4,6}\b',           # BM-1001 or BM1001
+    r'\bBean\s*Machine\s*#?\s*\d{4,6}\b',  # Bean Machine #1001
+    r'\bserial\s*(?:number|#|:)?\s*(\w{2,3}-?\d{4,6})\b',  # serial number: XX-1234
+    r'\bS/N\s*:?\s*(\w{2,3}-?\d{4,6})\b',  # S/N: XX-1234
+]
+
+def extract_serial_number(text: str) -> Optional[str]:
+    """
+    Extract a serial number from ticket text.
+    Returns the first matching serial number or None.
+    """
+    if not text:
+        return None
+
+    for pattern in SERIAL_PATTERNS:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            # Return the captured group if present, otherwise the full match
+            serial = match.group(1) if match.lastindex else match.group(0)
+            # Normalize: uppercase, ensure hyphen format
+            serial = serial.upper().strip()
+            # Add hyphen if missing (BM1001 -> BM-1001)
+            if re.match(r'^BM\d', serial):
+                serial = 'BM-' + serial[2:]
+            return serial
+
+    return None
 
 
 # =============================================================================
@@ -291,11 +347,46 @@ Respond with ONLY one word: High, Medium, or Low"""
         }
 
 
+def extract_serial(state: AgentState) -> AgentState:
+    """Extract serial number from ticket description if not already present."""
+    ticket = state.get("current_ticket")
+    log = state.get("log", [])
+
+    if not ticket:
+        return state
+
+    # Check if ticket already has a serial number
+    existing_serial = ticket.get("serial_number", "").strip()
+    if existing_serial:
+        log.append(f"[SERIAL] Ticket already has serial number: {existing_serial}")
+        return {
+            **state,
+            "extracted_serial": None,  # Don't overwrite existing
+            "log": log,
+        }
+
+    # Try to extract from subject and description
+    combined_text = f"{ticket.get('subject', '')} {ticket.get('description', '')}"
+    extracted = extract_serial_number(combined_text)
+
+    if extracted:
+        log.append(f"[SERIAL] Extracted serial number: {extracted}")
+    else:
+        log.append("[SERIAL] No serial number found in ticket text")
+
+    return {
+        **state,
+        "extracted_serial": extracted,
+        "log": log,
+    }
+
+
 def update_ticket(state: AgentState) -> AgentState:
-    """Update the ticket in the API with category and priority."""
+    """Update the ticket in the API with category, priority, and serial number."""
     ticket = state.get("current_ticket")
     category = state.get("classified_category")
     priority = state.get("assigned_priority")
+    serial = state.get("extracted_serial")
     log = state.get("log", [])
     errors = state.get("errors", [])
 
@@ -304,18 +395,28 @@ def update_ticket(state: AgentState) -> AgentState:
 
     log.append(f"[UPDATE] Updating ticket {ticket['id']}...")
 
+    # Build update payload
+    update_data = {
+        "category": category,
+        "priority": priority,
+    }
+
+    # Add serial number if extracted
+    if serial:
+        update_data["serial_number"] = serial
+
     try:
         response = requests.post(
             f"{API_BASE_URL}/api/tickets/{ticket['id']}",
-            json={
-                "category": category,
-                "priority": priority,
-            },
+            json=update_data,
             timeout=10
         )
         response.raise_for_status()
 
-        log.append(f"[UPDATE] Success! Ticket updated with category='{category}', priority='{priority}'")
+        update_msg = f"[UPDATE] Success! category='{category}', priority='{priority}'"
+        if serial:
+            update_msg += f", serial_number='{serial}'"
+        log.append(update_msg)
 
         return {
             **state,
@@ -369,6 +470,7 @@ def build_agent() -> StateGraph:
     workflow.add_node("select_next", select_next_ticket)
     workflow.add_node("classify", classify_ticket)
     workflow.add_node("prioritize", assign_priority)
+    workflow.add_node("extract_serial", extract_serial)
     workflow.add_node("update", update_ticket)
     workflow.add_node("increment", increment_index)
 
@@ -388,7 +490,8 @@ def build_agent() -> StateGraph:
 
     # Main processing flow
     workflow.add_edge("classify", "prioritize")
-    workflow.add_edge("prioritize", "update")
+    workflow.add_edge("prioritize", "extract_serial")
+    workflow.add_edge("extract_serial", "update")
     workflow.add_edge("update", "increment")
     workflow.add_edge("increment", "select_next")
 
@@ -396,13 +499,120 @@ def build_agent() -> StateGraph:
 
 
 # =============================================================================
-# Main Entry Point
+# Single Ticket Processing (for WebSocket mode)
+# =============================================================================
+
+def process_single_ticket(ticket_id: str) -> dict:
+    """
+    Process a single ticket by ID.
+    Used by WebSocket mode when a new ticket is created.
+    """
+    print(f"\n[WEBSOCKET] Processing new ticket: {ticket_id}")
+
+    # Fetch the ticket
+    try:
+        response = requests.get(f"{API_BASE_URL}/api/tickets/{ticket_id}", timeout=10)
+        response.raise_for_status()
+        ticket = response.json()
+    except requests.RequestException as e:
+        print(f"[ERROR] Failed to fetch ticket {ticket_id}: {e}")
+        return {"error": str(e)}
+
+    # Check if already processed
+    if ticket.get("category") and ticket.get("priority"):
+        print(f"[SKIP] Ticket {ticket_id} already processed")
+        return {"skipped": True}
+
+    # Build a mini-workflow state with just this ticket
+    initial_state: AgentState = {
+        "tickets": [ticket],
+        "current_index": 0,
+        "current_ticket": None,
+        "classified_category": None,
+        "assigned_priority": None,
+        "extracted_serial": None,
+        "log": [],
+        "errors": [],
+    }
+
+    # Run the agent
+    agent = build_agent()
+    final_state = agent.invoke(initial_state)
+
+    # Print log entries
+    for entry in final_state.get("log", []):
+        print(entry)
+
+    if final_state.get("errors"):
+        for error in final_state["errors"]:
+            print(f"[ERROR] {error}")
+
+    return final_state
+
+
+# =============================================================================
+# WebSocket Real-Time Mode
+# =============================================================================
+
+async def run_agent_websocket():
+    """
+    Run the agent in WebSocket mode - continuously listen for new tickets
+    and process them in real-time.
+    """
+    if not WEBSOCKETS_AVAILABLE:
+        print("[ERROR] websockets library not installed. Install with: pip install websockets")
+        return
+
+    ws_url = API_BASE_URL.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
+
+    print("=" * 60)
+    print("BeanBotics Support Agent - Real-Time Mode")
+    print("=" * 60)
+    print(f"API URL: {API_BASE_URL}")
+    print(f"WebSocket URL: {ws_url}")
+    print(f"Model: {OPENAI_MODEL}")
+    print("=" * 60)
+    print("\nListening for new tickets... (Press Ctrl+C to stop)")
+    print("-" * 60)
+
+    while True:
+        try:
+            async with websockets.connect(ws_url) as websocket:
+                print("[CONNECTED] WebSocket connection established")
+
+                async for message in websocket:
+                    try:
+                        data = json.loads(message)
+                        ticket_id = data.get("ticketId")
+                        update_type = data.get("updateType")
+
+                        print(f"\n[EVENT] {update_type}: {ticket_id}")
+
+                        # Only process newly created tickets
+                        if update_type == "created":
+                            process_single_ticket(ticket_id)
+                        else:
+                            print(f"[SKIP] Ignoring {update_type} event")
+
+                    except json.JSONDecodeError:
+                        print(f"[WARN] Invalid JSON message: {message}")
+
+        except websockets.ConnectionClosed:
+            print("[DISCONNECTED] WebSocket connection closed. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"[ERROR] WebSocket error: {e}. Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+
+
+# =============================================================================
+# Main Entry Point - Batch Mode
 # =============================================================================
 
 def run_agent():
-    """Run the BeanBotics support agent."""
+    """Run the BeanBotics support agent in batch mode (process all unprocessed tickets once)."""
     print("=" * 60)
-    print("BeanBotics Support Agent - MVP")
+    print("BeanBotics Support Agent - Batch Mode")
     print("=" * 60)
     print(f"API URL: {API_BASE_URL}")
     print(f"Model: {OPENAI_MODEL}")
@@ -417,6 +627,7 @@ def run_agent():
         "current_ticket": None,
         "classified_category": None,
         "assigned_priority": None,
+        "extracted_serial": None,
         "log": [],
         "errors": [],
     }
@@ -446,5 +657,37 @@ def run_agent():
     return final_state
 
 
+# =============================================================================
+# CLI Entry Point
+# =============================================================================
+
+def main():
+    """Main entry point with CLI argument handling."""
+    import sys
+
+    if "--watch" in sys.argv or "-w" in sys.argv:
+        # Real-time WebSocket mode
+        print("Starting in real-time watch mode...")
+        asyncio.run(run_agent_websocket())
+    elif "--help" in sys.argv or "-h" in sys.argv:
+        print("""
+BeanBotics Support Agent
+
+Usage:
+    python beanbotics_agent.py           # Batch mode (process all unprocessed tickets)
+    python beanbotics_agent.py --watch   # Real-time mode (listen via WebSocket)
+    python beanbotics_agent.py --help    # Show this help message
+
+Configuration:
+    Edit secrets.env with your settings:
+    - OPENAI_API_KEY: Your OpenAI API key
+    - OPENAI_MODEL: Model to use (default: gpt-4o)
+    - TICKETING_API_URL: Ticketing system URL (default: http://localhost:3000)
+""")
+    else:
+        # Batch mode (default)
+        run_agent()
+
+
 if __name__ == "__main__":
-    run_agent()
+    main()

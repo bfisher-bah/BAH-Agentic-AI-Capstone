@@ -8,9 +8,10 @@ This agent automatically:
 1. Fetches unprocessed tickets from the ticketing system API
 2. Classifies tickets into categories (Mechanical, Coffee Quality, Maintenance, etc.)
 3. Assigns priority levels (High, Medium, Low)
-4. Updates tickets in the system via API
+4. Extracts serial numbers from ticket descriptions
+5. Updates tickets in the system via API
 
-**This is NOT an interactive chatbot** - it's an autonomous batch processor that runs, processes tickets, and exits.
+**This is NOT an interactive chatbot** - it's an autonomous processor that can run in batch mode (process once) or real-time mode (WebSocket listener).
 
 ## Project Structure
 
@@ -92,32 +93,50 @@ python beanbotics_agent.py
 
 ## Usage
 
-### Command Line
+### Batch Mode (Default)
+
+Process all unprocessed tickets once and exit:
 
 ```bash
 python beanbotics_agent.py
 ```
 
+### Real-Time Mode (WebSocket)
+
+Continuously listen for new tickets and process them as they arrive:
+
+```bash
+python beanbotics_agent.py --watch
+```
+
+### Show Help
+
+```bash
+python beanbotics_agent.py --help
+```
+
 ### From Jupyter/SageMaker
 
 ```python
-# Option 1: Set environment variable first
+# Batch mode
 import os
 os.environ["OPENAI_API_KEY"] = "sk-your-key-here"
 
 from beanbotics_agent import run_agent
 run_agent()
 
-# Option 2: Load from secrets.env (if in same directory)
-from beanbotics_agent import run_agent
-run_agent()
+# Real-time mode (async)
+from beanbotics_agent import run_agent_websocket
+await run_agent_websocket()
 ```
 
 ## Expected Output
 
+### Batch Mode
+
 ```
 ============================================================
-BeanBotics Support Agent - MVP
+BeanBotics Support Agent - Batch Mode
 ============================================================
 API URL: http://localhost:3000
 Model: gpt-4o
@@ -135,15 +154,39 @@ PROCESSING LOG:
 [CLASSIFY] Category: Mechanical
 [PRIORITY] Determining priority level...
 [PRIORITY] Priority: High
+[SERIAL] Extracted serial number: BM-1001
 [UPDATE] Updating ticket abc-123...
-[UPDATE] Success! Ticket updated with category='Mechanical', priority='High'
-
-[SELECT] Processing ticket 2/2: def-456...
-...
+[UPDATE] Success! category='Mechanical', priority='High', serial_number='BM-1001'
 
 ============================================================
 Agent finished.
 ============================================================
+```
+
+### Real-Time Mode
+
+```
+============================================================
+BeanBotics Support Agent - Real-Time Mode
+============================================================
+API URL: http://localhost:3000
+WebSocket URL: ws://localhost:3000/ws
+Model: gpt-4o
+============================================================
+
+Listening for new tickets... (Press Ctrl+C to stop)
+------------------------------------------------------------
+[CONNECTED] WebSocket connection established
+
+[EVENT] created: abc-123
+
+[WEBSOCKET] Processing new ticket: abc-123
+[CLASSIFY] Analyzing ticket content...
+[CLASSIFY] Category: Mechanical
+[PRIORITY] Determining priority level...
+[PRIORITY] Priority: High
+[SERIAL] No serial number found in ticket text
+[UPDATE] Success! category='Mechanical', priority='High'
 ```
 
 ## Classification Categories
@@ -188,9 +231,17 @@ Agent finished.
 - All tickets already have category and priority assigned
 - Create a new ticket in the web UI (http://localhost:3000) without filling in category/priority
 
-## Next Steps (Future Enhancements)
+## Features
 
-- [ ] WebSocket listener for real-time processing
+### Implemented
+- [x] Batch mode - process all unprocessed tickets once
+- [x] Real-time mode - WebSocket listener for continuous processing (`--watch` flag)
+- [x] Automatic classification into 8 categories
+- [x] Priority assignment (High/Medium/Low)
+- [x] Serial number extraction from ticket text
+- [x] Auto-reconnect on WebSocket disconnection
+
+### Future Enhancements
 - [ ] RAG integration for automated troubleshooting responses
 - [ ] Missing information detection
 - [ ] Escalation logic for complex issues

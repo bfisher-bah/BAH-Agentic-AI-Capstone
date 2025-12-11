@@ -217,14 +217,22 @@ Use the LLM to extract from ticket content:
 
 ## Phase 4: Optional/Enhanced Features
 
-### 4.1 Missing Information Handling
+### 4.1 Serial Number Extraction ✅ NEW - IMPLEMENTED
+
+- [x] Extract serial numbers from ticket subject/description using regex patterns
+- [x] Support multiple formats: BM-1001, BM1001, "serial number: XX-1234", "S/N: XX-1234"
+- [x] Normalize extracted serial numbers (uppercase, hyphen format)
+- [x] Only extract if ticket doesn't already have a serial number
+- [x] Update ticket with extracted serial number via API
+
+### 4.2 Missing Information Handling
 
 - [ ] Detect incomplete tickets (missing serial number, vague descriptions)
 - [ ] Generate polite response requesting specific missing details
 - [ ] Post response via API to ticket thread
 - [ ] Track which tickets are awaiting customer response
 
-### 4.2 RAG System Integration
+### 4.3 RAG System Integration
 
 - [ ] Load support documentation from `support-info/` using `DirectoryLoader`
 - [ ] Create vector store using `InMemoryVectorStore` with OpenAI embeddings
@@ -244,20 +252,20 @@ Use the LLM to extract from ticket content:
 | `cleaning-maintenance.md` | Cleaning/Maintenance |
 | `installation-setup.md` | Installation/Setup |
 
-### 4.3 WebSocket Real-Time Integration
+### 4.4 WebSocket Real-Time Integration ✅ IMPLEMENTED
 
-- [ ] Implement async WebSocket listener for real-time ticket updates
-- [ ] Handle `ticket_created` events to process new tickets immediately
-- [ ] Handle `ticket_updated` events if relevant
-- [ ] Include fallback to HTTP polling if WebSocket unavailable
+- [x] Implement async WebSocket listener for real-time ticket updates - `run_agent_websocket()`
+- [x] Handle `created` events to process new tickets immediately
+- [x] Auto-reconnect on connection loss with 5-second retry
+- [x] CLI flag `--watch` to enable real-time mode
 
 **WebSocket Events:**
 
-- `ticket_created` - New ticket submitted
-- `ticket_updated` - Ticket fields modified
-- `ticket_deleted` - Ticket removed
-- `response_added` - New response on ticket
-- `status_changed` - Ticket status updated
+- `created` - New ticket submitted ✅ Handled
+- `updated` - Ticket fields modified (skipped)
+- `deleted` - Ticket removed (skipped)
+- `response` - New response on ticket (skipped)
+- `status` - Ticket status updated (skipped)
 
 ### 4.4 Escalation Logic
 
@@ -409,12 +417,13 @@ Using the provided PowerPoint template (`CapstoneMisc/BAH Team Presentation Temp
 - [x] Agent assigns appropriate priority levels - `assign_priority()` node
 - [x] Agent updates tickets in the system - `update_ticket()` node
 
-### Enhanced Version
+### Enhanced Version (Partially Implemented)
 
+- [x] Agent extracts serial numbers from ticket text - `extract_serial()` node
 - [ ] Agent requests missing information from customers
 - [ ] Agent uses RAG to provide troubleshooting guidance
 - [ ] Agent escalates complex issues appropriately
-- [ ] Agent monitors real-time updates via WebSocket
+- [x] Agent monitors real-time updates via WebSocket - `run_agent_websocket()` with `--watch` flag
 
 ### Presentation
 
@@ -547,29 +556,41 @@ workflow.add_edge(START, "classify")
 
 ## Next Steps
 
-**Phases 1-3 MVP are complete.** The agent can now classify and prioritize tickets.
+**Phases 1-3 MVP + Phase 4 WebSocket are complete.** The agent can now classify, prioritize, and extract serial numbers from tickets, with real-time WebSocket support.
 
 ### Completed
-1. ~~Schedule team meeting to review this plan~~ → Done
-2. ~~Assign roles and responsibilities~~ → Done
-3. ~~Set up shared development environment~~ → Done
-4. ~~Phase 1: Environment setup~~ → ✅ Complete
-5. ~~Phase 2: Architecture design~~ → ✅ Complete
-6. ~~Phase 3: MVP Implementation~~ → ✅ Complete
+1. ~~Phase 1: Environment setup~~ → ✅ Complete
+2. ~~Phase 2: Architecture design~~ → ✅ Complete
+3. ~~Phase 3: MVP Implementation~~ → ✅ Complete
+4. ~~Phase 4.1: Serial Number Extraction~~ → ✅ Complete
+5. ~~Phase 4.4: WebSocket Real-Time Mode~~ → ✅ Complete
 
-### Current: Test the MVP
+### Current: Test the Enhanced Agent
 1. Start the ticketing system: `cd ticketing-system && npm run dev`
 2. Configure `secrets.env` with your OpenAI API key
-3. Run the agent: `python beanbotics_agent.py`
-4. Verify tickets are classified correctly in the web UI
+3. Test batch mode: `python beanbotics_agent.py`
+4. Test real-time mode: `python beanbotics_agent.py --watch`
+5. In a browser, create a new ticket and watch it get processed automatically
 
-### Up Next: Choose Enhancement Path
-Pick which Phase 4 features to implement based on time:
-- **RAG Integration** - Add automated troubleshooting responses
-- **WebSocket** - Real-time ticket processing for better demos
+### Running the Agent
+
+**Batch Mode (process all unprocessed tickets once):**
+```bash
+python beanbotics_agent.py
+```
+
+**Real-Time Mode (WebSocket - continuously listen for new tickets):**
+```bash
+python beanbotics_agent.py --watch
+```
+
+### Up Next: Choose Additional Enhancements
+Pick which remaining Phase 4 features to implement based on time:
+- **RAG Integration** - Add automated troubleshooting responses from support docs
 - **Missing Info Detection** - Request details from customers
+- **Escalation Logic** - Flag complex issues for human review
 
 ---
 
 *Plan created: December 2024*
-*Updated: December 2024 - Phases 1-3 MVP complete*
+*Updated: December 2024 - Phases 1-3 MVP + Phase 4 WebSocket & Serial Extraction complete*
