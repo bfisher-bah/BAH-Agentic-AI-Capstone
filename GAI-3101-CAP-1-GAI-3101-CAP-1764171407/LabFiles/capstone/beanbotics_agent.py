@@ -176,8 +176,35 @@ llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0.0)
 # RAG System Setup
 # =============================================================================
 
-# Path to support documentation
-SUPPORT_DOCS_PATH = Path(__file__).parent / "support-info"
+def _find_support_docs_path() -> Path:
+    """
+    Find the support-info directory, handling both script and notebook execution.
+    """
+    # Try multiple possible locations
+    possible_paths = [
+        # When running as a script
+        Path(__file__).parent / "support-info" if '__file__' in dir() else None,
+        # Current working directory
+        Path.cwd() / "support-info",
+        # Parent of current directory (if running from a subdirectory)
+        Path.cwd().parent / "support-info",
+        # Explicit capstone path
+        Path.cwd() / "capstone" / "support-info",
+        # For Jupyter notebooks - look relative to notebook location
+        Path("support-info"),
+        Path("./support-info"),
+    ]
+
+    for path in possible_paths:
+        if path is not None and path.exists() and path.is_dir():
+            return path
+
+    # Default fallback
+    return Path("support-info")
+
+
+# Path to support documentation (resolved at runtime)
+SUPPORT_DOCS_PATH = _find_support_docs_path()
 
 # Global vector store (initialized lazily)
 _vector_store = None
@@ -187,10 +214,19 @@ def get_retriever():
     Initialize and return the RAG retriever.
     Uses lazy initialization to avoid loading docs until needed.
     """
-    global _vector_store
+    global _vector_store, SUPPORT_DOCS_PATH
 
     if _vector_store is None:
-        print("[RAG] Loading support documentation...")
+        # Re-resolve path in case it wasn't found at module load time
+        SUPPORT_DOCS_PATH = _find_support_docs_path()
+
+        print(f"[RAG] Loading support documentation from: {SUPPORT_DOCS_PATH}")
+
+        if not SUPPORT_DOCS_PATH.exists():
+            print(f"[RAG ERROR] Support docs directory not found: {SUPPORT_DOCS_PATH}")
+            print(f"[RAG] Current working directory: {Path.cwd()}")
+            return None
+
         try:
             # Load all markdown files from support-info directory
             loader = DirectoryLoader(
@@ -199,6 +235,11 @@ def get_retriever():
                 show_progress=False
             )
             docs = loader.load()
+
+            if not docs:
+                print(f"[RAG ERROR] No markdown files found in {SUPPORT_DOCS_PATH}")
+                return None
+
             print(f"[RAG] Loaded {len(docs)} support documents")
 
             # Create embeddings and vector store
@@ -209,6 +250,8 @@ def get_retriever():
 
         except Exception as e:
             print(f"[RAG ERROR] Failed to initialize RAG system: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     return _vector_store.as_retriever()
