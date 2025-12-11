@@ -273,9 +273,23 @@ def fetch_tickets(state: AgentState) -> AgentState:
     """
     Fetch all tickets from the API and filter for unprocessed ones.
     Unprocessed = missing category or priority.
+
+    If tickets are already provided in the state (e.g., for re-processing after
+    a customer response), skip fetching and use those instead.
     """
     log = state.get("log", [])
     errors = state.get("errors", [])
+
+    # If tickets are already provided in state, use them (for re-processing scenarios)
+    existing_tickets = state.get("tickets", [])
+    if existing_tickets:
+        log.append(f"[FETCH] Using {len(existing_tickets)} pre-loaded ticket(s) for processing")
+        return {
+            **state,
+            "current_index": 0,
+            "log": log,
+            "errors": errors,
+        }
 
     log.append("[FETCH] Fetching tickets from API...")
 
