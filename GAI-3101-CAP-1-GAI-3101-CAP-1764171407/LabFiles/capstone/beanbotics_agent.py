@@ -7,7 +7,8 @@ This agent:
 2. Classifies tickets into categories (Mechanical, Quality, Maintenance, etc.)
 3. Assigns priority levels (High, Medium, Low)
 4. Extracts serial numbers from ticket descriptions
-5. Updates tickets in the system via API
+5. Uses RAG to generate troubleshooting responses from support documentation
+6. Updates tickets and posts responses via API
 
 Modes:
     - Batch mode: Process all unprocessed tickets once and exit
@@ -38,7 +39,9 @@ from pathlib import Path
 from typing import TypedDict, Optional, List
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.document_loaders import DirectoryLoader
+from langchain_core.vectorstores import InMemoryVectorStore
 from langgraph.graph import StateGraph, START, END
 
 # WebSocket import (optional, for real-time mode)
@@ -103,6 +106,8 @@ class AgentState(TypedDict):
     assigned_priority: Optional[str]
     # Extracted serial number
     extracted_serial: Optional[str]
+    # RAG-generated response
+    rag_response: Optional[str]
     # Processing log
     log: List[str]
     # Error tracking
@@ -165,6 +170,48 @@ def generate_serial_number(ticket_id: str) -> str:
 # =============================================================================
 
 llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0.0)
+
+
+# =============================================================================
+# RAG System Setup
+# =============================================================================
+
+# Path to support documentation
+SUPPORT_DOCS_PATH = Path(__file__).parent / "support-info"
+
+# Global vector store (initialized lazily)
+_vector_store = None
+
+def get_retriever():
+    """
+    Initialize and return the RAG retriever.
+    Uses lazy initialization to avoid loading docs until needed.
+    """
+    global _vector_store
+
+    if _vector_store is None:
+        print("[RAG] Loading support documentation...")
+        try:
+            # Load all markdown files from support-info directory
+            loader = DirectoryLoader(
+                str(SUPPORT_DOCS_PATH),
+                glob="**/*.md",
+                show_progress=False
+            )
+            docs = loader.load()
+            print(f"[RAG] Loaded {len(docs)} support documents")
+
+            # Create embeddings and vector store
+            embeddings = OpenAIEmbeddings()
+            _vector_store = InMemoryVectorStore(embeddings)
+            _vector_store.add_documents(docs)
+            print("[RAG] Vector store initialized")
+
+        except Exception as e:
+            print(f"[RAG ERROR] Failed to initialize RAG system: {e}")
+            return None
+
+    return _vector_store.as_retriever()
 
 
 # =============================================================================
@@ -398,6 +445,141 @@ def extract_serial(state: AgentState) -> AgentState:
     }
 
 
+def generate_rag_response(state: AgentState) -> AgentState:
+    """
+    Use RAG to retrieve relevant support documentation and generate
+    a helpful troubleshooting response for the customer.
+    """
+    ticket = state.get("current_ticket")
+    category = state.get("classified_category")
+    log = state.get("log", [])
+    errors = state.get("errors", [])
+
+    if not ticket:
+        return state
+
+    log.append("[RAG] Retrieving relevant support documentation...")
+
+    # Get the retriever
+    retriever = get_retriever()
+    if retriever is None:
+        log.append("[RAG] Skipping - RAG system not available")
+        return {
+            **state,
+            "rag_response": None,
+            "log": log,
+        }
+
+    try:
+        # Build query from ticket content
+        query = f"{ticket['subject']} {ticket.get('description', '')}"
+
+        # Retrieve relevant documents
+        docs = retriever.invoke(query)
+        if not docs:
+            log.append("[RAG] No relevant documents found")
+            return {
+                **state,
+                "rag_response": None,
+                "log": log,
+            }
+
+        log.append(f"[RAG] Found {len(docs)} relevant document(s)")
+
+        # Combine retrieved content
+        context = "\n\n".join([doc.page_content for doc in docs[:3]])  # Top 3 docs
+
+        # Generate response using LLM
+        prompt = f"""You are a helpful support agent for BeanBotics Inc., maker of the "Bean Machine" coffee robot.
+
+Based on the support documentation below, write a helpful response to the customer's support ticket.
+Be friendly, professional, and provide specific troubleshooting steps if applicable.
+Keep the response concise (2-4 paragraphs).
+
+SUPPORT DOCUMENTATION:
+{context}
+
+CUSTOMER TICKET:
+- Subject: {ticket['subject']}
+- Description: {ticket.get('description', 'No description provided')}
+- Category: {category}
+- Customer Name: {ticket['customer_name']}
+
+Write a response that:
+1. Acknowledges their issue
+2. Provides relevant troubleshooting steps from the documentation
+3. Offers next steps or asks clarifying questions if needed
+4. Signs off professionally as "BeanBot - BeanBotics Support"
+
+RESPONSE:"""
+
+        response = llm.invoke(prompt)
+        rag_response = response.content.strip()
+
+        log.append("[RAG] Generated troubleshooting response")
+
+        return {
+            **state,
+            "rag_response": rag_response,
+            "log": log,
+        }
+
+    except Exception as e:
+        errors.append(f"[RAG ERROR] {e}")
+        log.append(f"[RAG] Error generating response: {e}")
+        return {
+            **state,
+            "rag_response": None,
+            "log": log,
+            "errors": errors,
+        }
+
+
+def post_response(state: AgentState) -> AgentState:
+    """Post the RAG-generated response to the ticket."""
+    ticket = state.get("current_ticket")
+    rag_response = state.get("rag_response")
+    log = state.get("log", [])
+    errors = state.get("errors", [])
+
+    if not ticket or not rag_response:
+        if not rag_response:
+            log.append("[RESPONSE] No response to post (RAG skipped or failed)")
+        return {
+            **state,
+            "log": log,
+        }
+
+    log.append(f"[RESPONSE] Posting response to ticket {ticket['id']}...")
+
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/api/tickets/{ticket['id']}/responses",
+            json={
+                "author": "BeanBot",
+                "message": rag_response,
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+
+        log.append("[RESPONSE] Successfully posted troubleshooting response")
+
+        return {
+            **state,
+            "log": log,
+        }
+
+    except requests.RequestException as e:
+        errors.append(f"[RESPONSE ERROR] Failed to post response: {e}")
+        log.append(f"[RESPONSE] Error: {e}")
+        return {
+            **state,
+            "log": log,
+            "errors": errors,
+        }
+
+
 def update_ticket(state: AgentState) -> AgentState:
     """Update the ticket in the API with category, priority, and serial number."""
     ticket = state.get("current_ticket")
@@ -488,6 +670,8 @@ def build_agent() -> StateGraph:
     workflow.add_node("classify", classify_ticket)
     workflow.add_node("prioritize", assign_priority)
     workflow.add_node("extract_serial", extract_serial)
+    workflow.add_node("generate_response", generate_rag_response)
+    workflow.add_node("post_response", post_response)
     workflow.add_node("update", update_ticket)
     workflow.add_node("increment", increment_index)
 
@@ -505,10 +689,13 @@ def build_agent() -> StateGraph:
         }
     )
 
-    # Main processing flow
+    # Main processing flow:
+    # classify -> prioritize -> extract_serial -> generate_response -> post_response -> update -> increment
     workflow.add_edge("classify", "prioritize")
     workflow.add_edge("prioritize", "extract_serial")
-    workflow.add_edge("extract_serial", "update")
+    workflow.add_edge("extract_serial", "generate_response")
+    workflow.add_edge("generate_response", "post_response")
+    workflow.add_edge("post_response", "update")
     workflow.add_edge("update", "increment")
     workflow.add_edge("increment", "select_next")
 
@@ -548,6 +735,7 @@ def process_single_ticket(ticket_id: str) -> dict:
         "classified_category": None,
         "assigned_priority": None,
         "extracted_serial": None,
+        "rag_response": None,
         "log": [],
         "errors": [],
     }
@@ -645,6 +833,7 @@ def run_agent():
         "classified_category": None,
         "assigned_priority": None,
         "extracted_serial": None,
+        "rag_response": None,
         "log": [],
         "errors": [],
     }
