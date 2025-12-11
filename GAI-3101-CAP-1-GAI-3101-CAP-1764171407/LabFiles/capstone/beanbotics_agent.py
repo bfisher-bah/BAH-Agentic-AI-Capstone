@@ -9,27 +9,34 @@ This agent:
 4. Updates tickets in the system via API
 
 Usage:
+    # From command line:
     python beanbotics_agent.py
+
+    # From Jupyter/SageMaker:
+    from beanbotics_agent import run_agent
+    run_agent()
+
+Configuration:
+    Edit secrets.env with your OpenAI API key and other settings.
 """
 
 import os
 import json
 import requests
+from pathlib import Path
 from typing import TypedDict, Optional, List
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from secrets.env
+secrets_path = Path(__file__).parent / "secrets.env"
+load_dotenv(secrets_path)
 
-# =============================================================================
 # Configuration
-# =============================================================================
-
-API_BASE_URL = os.getenv("TICKETING_API_URL", "http://localhost:3000")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+API_BASE_URL = os.environ.get("TICKETING_API_URL", "http://localhost:3000")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 
 # Classification categories based on support documentation
 CATEGORIES = [
