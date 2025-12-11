@@ -1,9 +1,15 @@
 # BeanBotics Support Agent - Dependencies
+
+# Install tiktoken binary first (avoids compilation issues)
+tiktoken --only-binary=:all:
+
+# Core LangChain/LangGraph
 langchain==0.3.*
 langchain_openai==0.3.*
 langchain_community
 langgraph==0.4.*
+
+# Utilities
 websockets==15.0.*
-tiktoken
 requests
 python-dotenv
