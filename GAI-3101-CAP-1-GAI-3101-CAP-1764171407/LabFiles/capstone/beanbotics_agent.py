@@ -1085,7 +1085,10 @@ def process_customer_response(ticket_id: str) -> dict:
     """
     Process a customer response on a ticket.
     This is called when we detect a 'response' event and the response is from a customer.
-    We re-analyze the ticket with the new information and generate a follow-up.
+
+    We combine the original ticket with the customer's new response and re-run it through
+    the same processing workflow used for new tickets. This ensures escalation, RAG responses,
+    and all other logic is applied consistently.
     """
     print(f"\n[RESPONSE EVENT] Checking response on ticket: {ticket_id}")
 
@@ -1097,6 +1100,11 @@ def process_customer_response(ticket_id: str) -> dict:
     except requests.RequestException as e:
         print(f"[ERROR] Failed to fetch ticket {ticket_id}: {e}")
         return {"error": str(e)}
+
+    # Check if ticket is already escalated - no need to re-process
+    if ticket.get("status") == "escalated":
+        print("[SKIP] Ticket already escalated")
+        return {"skipped": True, "reason": "already_escalated"}
 
     # Get the responses
     responses = ticket.get("responses", [])
@@ -1115,97 +1123,52 @@ def process_customer_response(ticket_id: str) -> dict:
     print(f"[RESPONSE EVENT] Customer '{latest_response.get('author')}' responded")
     print(f"[RESPONSE EVENT] Message preview: {latest_response.get('message', '')[:100]}...")
 
-    # Check if we previously asked for missing info by looking at BeanBot responses
-    asked_for_info = False
-    for resp in responses:
-        if resp.get("author", "").lower() == "beanbot":
-            msg = resp.get("message", "").lower()
-            if "could you please provide" in msg or "following information" in msg:
-                asked_for_info = True
-                break
+    # Combine the original ticket description with the customer's new response
+    # This gives the workflow full context when evaluating escalation, generating RAG responses, etc.
+    original_description = ticket.get('description', '')
+    customer_update = latest_response.get('message', '')
+    combined_description = f"{original_description}\n\nCustomer follow-up: {customer_update}"
 
-    if not asked_for_info:
-        print("[SKIP] We didn't ask for info, this is a general follow-up")
-        return {"skipped": True}
+    # Create an enhanced ticket with the combined description
+    # Clear category/priority to force re-evaluation with new info
+    enhanced_ticket = {
+        **ticket,
+        "description": combined_description,
+        "category": "",  # Clear to trigger re-classification
+        "priority": "",  # Clear to trigger re-prioritization
+    }
 
-    print("[RESPONSE EVENT] Customer provided requested information, generating follow-up...")
+    print("[RESPONSE EVENT] Re-processing ticket with customer's additional information...")
 
-    # Generate a follow-up RAG response with the new information
-    # Combine ticket description with customer's response for better context
-    combined_description = f"{ticket.get('description', '')}\n\nCustomer update: {latest_response.get('message', '')}"
+    # Build a workflow state and run the ticket through the standard processing pipeline
+    initial_state: AgentState = {
+        "tickets": [enhanced_ticket],
+        "current_index": 0,
+        "current_ticket": None,
+        "classified_category": None,
+        "assigned_priority": None,
+        "extracted_serial": None,
+        "rag_response": None,
+        "missing_info": None,
+        "needs_escalation": False,
+        "escalation_reason": None,
+        "log": [],
+        "errors": [],
+    }
 
-    # Update ticket object with enhanced description for RAG
-    enhanced_ticket = {**ticket, "description": combined_description}
+    # Run the agent workflow - same as for new tickets
+    agent = build_agent()
+    final_state = agent.invoke(initial_state)
 
-    log = []
-    errors = []
+    # Print log entries
+    for entry in final_state.get("log", []):
+        print(entry)
 
-    # Get RAG response
-    log.append("[RAG] Retrieving relevant support documentation...")
-    retriever = get_retriever()
+    if final_state.get("errors"):
+        for error in final_state["errors"]:
+            print(f"[ERROR] {error}")
 
-    if retriever is None:
-        print("[RAG] RAG system not available")
-        return {"error": "RAG not available"}
-
-    try:
-        query = f"{ticket['subject']} {combined_description}"
-        docs = retriever.invoke(query)
-
-        if docs:
-            log.append(f"[RAG] Found {len(docs)} relevant document(s)")
-            context = "\n\n".join([doc.page_content for doc in docs[:3]])
-
-            prompt = f"""You are a helpful support agent for BeanBotics Inc., maker of the "Bean Machine" coffee robot.
-
-The customer previously submitted a support ticket and you asked for more information. They have now provided additional details.
-
-Based on the support documentation and the customer's updated information, provide a helpful follow-up response with specific troubleshooting steps.
-
-SUPPORT DOCUMENTATION:
-{context}
-
-ORIGINAL TICKET:
-- Subject: {ticket['subject']}
-- Original Description: {ticket.get('description', 'No description')}
-- Category: {ticket.get('category', 'Unknown')}
-
-CUSTOMER'S ADDITIONAL INFORMATION:
-{latest_response.get('message', '')}
-
-Write a response that:
-1. Thanks them for providing the additional information
-2. Provides specific troubleshooting steps based on what they told you
-3. Offers next steps if the issue persists
-4. Signs off as "BeanBot - BeanBotics Support"
-
-RESPONSE:"""
-
-            llm_response = llm.invoke(prompt)
-            follow_up_message = llm_response.content.strip()
-
-            # Post the follow-up response
-            post_response = requests.post(
-                f"{API_BASE_URL}/api/tickets/{ticket_id}/responses",
-                json={
-                    "author": "BeanBot",
-                    "message": follow_up_message,
-                },
-                timeout=10
-            )
-            post_response.raise_for_status()
-
-            print("[RAG] Generated and posted follow-up response")
-            log.append("[RAG] Successfully posted follow-up response")
-
-        else:
-            print("[RAG] No relevant documents found")
-
-    except Exception as e:
-        print(f"[ERROR] Failed to generate follow-up: {e}")
-        errors.append(str(e))
-
-    return {"log": log, "errors": errors}
+    return final_state
 
 
 # =============================================================================
