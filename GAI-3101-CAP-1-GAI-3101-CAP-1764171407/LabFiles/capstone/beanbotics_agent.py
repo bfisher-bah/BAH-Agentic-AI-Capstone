@@ -108,6 +108,11 @@ class AgentState(TypedDict):
     extracted_serial: Optional[str]
     # RAG-generated response
     rag_response: Optional[str]
+    # Missing information fields
+    missing_info: Optional[List[str]]
+    # Escalation flag and reason
+    needs_escalation: bool
+    escalation_reason: Optional[str]
     # Processing log
     log: List[str]
     # Error tracking
@@ -626,6 +631,266 @@ def post_response(state: AgentState) -> AgentState:
         }
 
 
+def detect_missing_info(state: AgentState) -> AgentState:
+    """
+    Detect if the ticket is missing critical information needed to resolve the issue.
+    If missing info is found, generate a polite request for the customer.
+    """
+    ticket = state.get("current_ticket")
+    category = state.get("classified_category")
+    log = state.get("log", [])
+    errors = state.get("errors", [])
+
+    if not ticket:
+        return state
+
+    log.append("[MISSING INFO] Checking for missing information...")
+
+    missing = []
+
+    # Check for missing serial number (if not already extracted/generated)
+    existing_serial = ticket.get("serial_number", "").strip()
+    extracted_serial = state.get("extracted_serial")
+    if not existing_serial and not extracted_serial:
+        missing.append("serial number")
+
+    # Check for vague or missing description
+    description = ticket.get("description", "").strip()
+    if len(description) < 20:
+        missing.append("detailed description of the issue")
+
+    # Category-specific checks
+    if category == "Coffee Quality":
+        desc_lower = description.lower()
+        if "bean" not in desc_lower and "coffee" not in desc_lower:
+            missing.append("type/brand of coffee beans being used")
+        if "clean" not in desc_lower and "maintenance" not in desc_lower:
+            missing.append("when the machine was last cleaned")
+
+    elif category == "Power/Startup":
+        desc_lower = description.lower()
+        if "light" not in desc_lower and "led" not in desc_lower and "display" not in desc_lower:
+            missing.append("status of indicator lights/display")
+        if "outlet" not in desc_lower and "plug" not in desc_lower and "power" not in desc_lower:
+            missing.append("confirmation that the power outlet works")
+
+    elif category == "Mechanical":
+        desc_lower = description.lower()
+        if "sound" not in desc_lower and "noise" not in desc_lower:
+            missing.append("any unusual sounds the machine makes")
+
+    if missing:
+        log.append(f"[MISSING INFO] Found {len(missing)} missing item(s): {', '.join(missing)}")
+    else:
+        log.append("[MISSING INFO] No critical information missing")
+
+    return {
+        **state,
+        "missing_info": missing if missing else None,
+        "log": log,
+    }
+
+
+def request_missing_info(state: AgentState) -> AgentState:
+    """
+    If missing information was detected, post a polite request to the customer.
+    """
+    ticket = state.get("current_ticket")
+    missing_info = state.get("missing_info")
+    log = state.get("log", [])
+    errors = state.get("errors", [])
+
+    if not ticket or not missing_info:
+        if not missing_info:
+            log.append("[REQUEST INFO] No missing info to request")
+        return {
+            **state,
+            "log": log,
+        }
+
+    log.append(f"[REQUEST INFO] Requesting missing information from customer...")
+
+    # Build a friendly request message
+    missing_list = "\n".join(f"  • {item.capitalize()}" for item in missing_info)
+
+    message = f"""Hello {ticket['customer_name']},
+
+Thank you for contacting BeanBotics Support! To help us resolve your issue as quickly as possible, could you please provide the following information:
+
+{missing_list}
+
+This will help our team better understand your situation and provide you with the most accurate assistance.
+
+Thank you for your patience!
+
+BeanBot - BeanBotics Support"""
+
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}/api/tickets/{ticket['id']}/responses",
+            json={
+                "author": "BeanBot",
+                "message": message,
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+
+        log.append("[REQUEST INFO] Successfully posted information request")
+
+        return {
+            **state,
+            "log": log,
+        }
+
+    except requests.RequestException as e:
+        errors.append(f"[REQUEST INFO ERROR] Failed to post request: {e}")
+        log.append(f"[REQUEST INFO] Error: {e}")
+        return {
+            **state,
+            "log": log,
+            "errors": errors,
+        }
+
+
+def check_escalation(state: AgentState) -> AgentState:
+    """
+    Determine if the ticket needs to be escalated to a human agent.
+    Escalation criteria:
+    - High priority + certain categories
+    - Safety concerns mentioned
+    - Water leak mentioned
+    - Customer frustration/urgency
+    - Repeated issues
+    """
+    ticket = state.get("current_ticket")
+    category = state.get("classified_category")
+    priority = state.get("assigned_priority")
+    log = state.get("log", [])
+
+    if not ticket:
+        return state
+
+    log.append("[ESCALATION] Checking escalation criteria...")
+
+    needs_escalation = False
+    escalation_reason = None
+
+    description = ticket.get("description", "").lower()
+    subject = ticket.get("subject", "").lower()
+    combined_text = f"{subject} {description}"
+
+    # Safety-related keywords
+    safety_keywords = ["smoke", "burning", "fire", "spark", "shock", "electric", "danger", "unsafe"]
+    for keyword in safety_keywords:
+        if keyword in combined_text:
+            needs_escalation = True
+            escalation_reason = f"Safety concern detected: '{keyword}' mentioned"
+            break
+
+    # Water leak is always urgent
+    if not needs_escalation and ("leak" in combined_text or "water damage" in combined_text or "flooding" in combined_text):
+        needs_escalation = True
+        escalation_reason = "Water leak or water damage reported"
+
+    # High priority mechanical/power issues
+    if not needs_escalation and priority == "High" and category in ["Mechanical", "Power/Startup"]:
+        needs_escalation = True
+        escalation_reason = f"High priority {category} issue requires technician review"
+
+    # Customer frustration indicators
+    frustration_keywords = ["furious", "angry", "terrible", "worst", "lawsuit", "lawyer", "refund", "return", "broken for weeks", "multiple times"]
+    for keyword in frustration_keywords:
+        if keyword in combined_text:
+            needs_escalation = True
+            escalation_reason = f"Customer frustration detected: '{keyword}' mentioned"
+            break
+
+    # Repeated issues
+    if not needs_escalation and ("again" in combined_text or "still" in combined_text or "keeps" in combined_text or "recurring" in combined_text):
+        if "not working" in combined_text or "broken" in combined_text or "same issue" in combined_text:
+            needs_escalation = True
+            escalation_reason = "Recurring/repeated issue reported"
+
+    if needs_escalation:
+        log.append(f"[ESCALATION] ⚠️  ESCALATION NEEDED: {escalation_reason}")
+    else:
+        log.append("[ESCALATION] No escalation needed")
+
+    return {
+        **state,
+        "needs_escalation": needs_escalation,
+        "escalation_reason": escalation_reason,
+        "log": log,
+    }
+
+
+def handle_escalation(state: AgentState) -> AgentState:
+    """
+    If escalation is needed, update the ticket status and post an escalation notice.
+    """
+    ticket = state.get("current_ticket")
+    needs_escalation = state.get("needs_escalation", False)
+    escalation_reason = state.get("escalation_reason")
+    log = state.get("log", [])
+    errors = state.get("errors", [])
+
+    if not ticket or not needs_escalation:
+        return {
+            **state,
+            "log": log,
+        }
+
+    log.append("[ESCALATION] Processing escalation...")
+
+    # Post escalation notice to ticket
+    message = f"""⚠️ **This ticket has been escalated for human review.**
+
+**Reason:** {escalation_reason}
+
+A member of our support team will review this ticket and reach out to you shortly. We apologize for any inconvenience and appreciate your patience.
+
+If this is an emergency or safety concern, please call our support hotline at 1-800-BEAN-BOT.
+
+BeanBot - BeanBotics Support"""
+
+    try:
+        # Post the escalation message
+        response = requests.post(
+            f"{API_BASE_URL}/api/tickets/{ticket['id']}/responses",
+            json={
+                "author": "BeanBot",
+                "message": message,
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+
+        # Update ticket status to escalated
+        status_response = requests.post(
+            f"{API_BASE_URL}/api/tickets/{ticket['id']}/status",
+            json={"status": "escalated"},
+            timeout=10
+        )
+        status_response.raise_for_status()
+
+        log.append("[ESCALATION] Ticket escalated and status updated")
+
+        return {
+            **state,
+            "log": log,
+        }
+
+    except requests.RequestException as e:
+        errors.append(f"[ESCALATION ERROR] Failed to process escalation: {e}")
+        log.append(f"[ESCALATION] Error: {e}")
+        return {
+            **state,
+            "log": log,
+            "errors": errors,
+        }
+
+
 def update_ticket(state: AgentState) -> AgentState:
     """Update the ticket in the API with category, priority, and serial number."""
     ticket = state.get("current_ticket")
@@ -716,6 +981,10 @@ def build_agent() -> StateGraph:
     workflow.add_node("classify", classify_ticket)
     workflow.add_node("prioritize", assign_priority)
     workflow.add_node("extract_serial", extract_serial)
+    workflow.add_node("check_escalation", check_escalation)
+    workflow.add_node("handle_escalation", handle_escalation)
+    workflow.add_node("detect_missing_info", detect_missing_info)
+    workflow.add_node("request_missing_info", request_missing_info)
     workflow.add_node("generate_response", generate_rag_response)
     workflow.add_node("post_response", post_response)
     workflow.add_node("update", update_ticket)
@@ -736,10 +1005,18 @@ def build_agent() -> StateGraph:
     )
 
     # Main processing flow:
-    # classify -> prioritize -> extract_serial -> generate_response -> post_response -> update -> increment
+    # 1. classify -> prioritize -> extract_serial
+    # 2. check_escalation -> handle_escalation (if needed)
+    # 3. detect_missing_info -> request_missing_info (if needed)
+    # 4. generate_response -> post_response
+    # 5. update -> increment -> loop
     workflow.add_edge("classify", "prioritize")
     workflow.add_edge("prioritize", "extract_serial")
-    workflow.add_edge("extract_serial", "generate_response")
+    workflow.add_edge("extract_serial", "check_escalation")
+    workflow.add_edge("check_escalation", "handle_escalation")
+    workflow.add_edge("handle_escalation", "detect_missing_info")
+    workflow.add_edge("detect_missing_info", "request_missing_info")
+    workflow.add_edge("request_missing_info", "generate_response")
     workflow.add_edge("generate_response", "post_response")
     workflow.add_edge("post_response", "update")
     workflow.add_edge("update", "increment")
@@ -782,6 +1059,9 @@ def process_single_ticket(ticket_id: str) -> dict:
         "assigned_priority": None,
         "extracted_serial": None,
         "rag_response": None,
+        "missing_info": None,
+        "needs_escalation": False,
+        "escalation_reason": None,
         "log": [],
         "errors": [],
     }
@@ -880,6 +1160,9 @@ def run_agent():
         "assigned_priority": None,
         "extracted_serial": None,
         "rag_response": None,
+        "missing_info": None,
+        "needs_escalation": False,
+        "escalation_reason": None,
         "log": [],
         "errors": [],
     }
