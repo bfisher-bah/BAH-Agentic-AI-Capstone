@@ -110,7 +110,7 @@ class AgentState(TypedDict):
 
 
 # =============================================================================
-# Serial Number Extraction
+# Serial Number Extraction & Generation
 # =============================================================================
 
 # Common serial number patterns for Bean Machine
@@ -143,6 +143,21 @@ def extract_serial_number(text: str) -> Optional[str]:
             return serial
 
     return None
+
+
+def generate_serial_number(ticket_id: str) -> str:
+    """
+    Generate a serial number for tickets that don't have one.
+    Uses a deterministic approach based on ticket ID to ensure consistency.
+
+    Format: BM-XXXX where XXXX is derived from the ticket ID
+    """
+    import hashlib
+    # Create a hash of the ticket ID and take first 4 digits
+    hash_digest = hashlib.md5(ticket_id.encode()).hexdigest()
+    # Convert hex to decimal and take last 4 digits, ensuring range 1000-9999
+    numeric_part = (int(hash_digest[:8], 16) % 9000) + 1000
+    return f"BM-{numeric_part}"
 
 
 # =============================================================================
@@ -348,7 +363,7 @@ Respond with ONLY one word: High, Medium, or Low"""
 
 
 def extract_serial(state: AgentState) -> AgentState:
-    """Extract serial number from ticket description if not already present."""
+    """Extract or generate serial number for ticket if not already present."""
     ticket = state.get("current_ticket")
     log = state.get("log", [])
 
@@ -370,9 +385,11 @@ def extract_serial(state: AgentState) -> AgentState:
     extracted = extract_serial_number(combined_text)
 
     if extracted:
-        log.append(f"[SERIAL] Extracted serial number: {extracted}")
+        log.append(f"[SERIAL] Extracted serial number from ticket: {extracted}")
     else:
-        log.append("[SERIAL] No serial number found in ticket text")
+        # Generate a serial number if none found
+        extracted = generate_serial_number(ticket.get("id", "unknown"))
+        log.append(f"[SERIAL] Generated serial number: {extracted}")
 
     return {
         **state,
