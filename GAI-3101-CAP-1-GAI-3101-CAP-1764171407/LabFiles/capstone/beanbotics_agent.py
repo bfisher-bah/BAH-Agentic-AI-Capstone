@@ -1081,6 +1081,133 @@ def process_single_ticket(ticket_id: str) -> dict:
     return final_state
 
 
+def process_customer_response(ticket_id: str) -> dict:
+    """
+    Process a customer response on a ticket.
+    This is called when we detect a 'response' event and the response is from a customer.
+    We re-analyze the ticket with the new information and generate a follow-up.
+    """
+    print(f"\n[RESPONSE EVENT] Checking response on ticket: {ticket_id}")
+
+    # Fetch the full ticket with responses
+    try:
+        response = requests.get(f"{API_BASE_URL}/api/tickets/{ticket_id}", timeout=10)
+        response.raise_for_status()
+        ticket = response.json()
+    except requests.RequestException as e:
+        print(f"[ERROR] Failed to fetch ticket {ticket_id}: {e}")
+        return {"error": str(e)}
+
+    # Get the responses
+    responses = ticket.get("responses", [])
+    if not responses:
+        print("[SKIP] No responses on ticket")
+        return {"skipped": True}
+
+    # Check if the latest response is from a customer (not BeanBot)
+    latest_response = responses[-1]
+    author = latest_response.get("author", "").lower()
+
+    if author == "beanbot":
+        print("[SKIP] Latest response is from BeanBot, not customer")
+        return {"skipped": True}
+
+    print(f"[RESPONSE EVENT] Customer '{latest_response.get('author')}' responded")
+    print(f"[RESPONSE EVENT] Message preview: {latest_response.get('message', '')[:100]}...")
+
+    # Check if we previously asked for missing info by looking at BeanBot responses
+    asked_for_info = False
+    for resp in responses:
+        if resp.get("author", "").lower() == "beanbot":
+            msg = resp.get("message", "").lower()
+            if "could you please provide" in msg or "following information" in msg:
+                asked_for_info = True
+                break
+
+    if not asked_for_info:
+        print("[SKIP] We didn't ask for info, this is a general follow-up")
+        return {"skipped": True}
+
+    print("[RESPONSE EVENT] Customer provided requested information, generating follow-up...")
+
+    # Generate a follow-up RAG response with the new information
+    # Combine ticket description with customer's response for better context
+    combined_description = f"{ticket.get('description', '')}\n\nCustomer update: {latest_response.get('message', '')}"
+
+    # Update ticket object with enhanced description for RAG
+    enhanced_ticket = {**ticket, "description": combined_description}
+
+    log = []
+    errors = []
+
+    # Get RAG response
+    log.append("[RAG] Retrieving relevant support documentation...")
+    retriever = get_retriever()
+
+    if retriever is None:
+        print("[RAG] RAG system not available")
+        return {"error": "RAG not available"}
+
+    try:
+        query = f"{ticket['subject']} {combined_description}"
+        docs = retriever.invoke(query)
+
+        if docs:
+            log.append(f"[RAG] Found {len(docs)} relevant document(s)")
+            context = "\n\n".join([doc.page_content for doc in docs[:3]])
+
+            prompt = f"""You are a helpful support agent for BeanBotics Inc., maker of the "Bean Machine" coffee robot.
+
+The customer previously submitted a support ticket and you asked for more information. They have now provided additional details.
+
+Based on the support documentation and the customer's updated information, provide a helpful follow-up response with specific troubleshooting steps.
+
+SUPPORT DOCUMENTATION:
+{context}
+
+ORIGINAL TICKET:
+- Subject: {ticket['subject']}
+- Original Description: {ticket.get('description', 'No description')}
+- Category: {ticket.get('category', 'Unknown')}
+
+CUSTOMER'S ADDITIONAL INFORMATION:
+{latest_response.get('message', '')}
+
+Write a response that:
+1. Thanks them for providing the additional information
+2. Provides specific troubleshooting steps based on what they told you
+3. Offers next steps if the issue persists
+4. Signs off as "BeanBot - BeanBotics Support"
+
+RESPONSE:"""
+
+            llm_response = llm.invoke(prompt)
+            follow_up_message = llm_response.content.strip()
+
+            # Post the follow-up response
+            post_response = requests.post(
+                f"{API_BASE_URL}/api/tickets/{ticket_id}/responses",
+                json={
+                    "author": "BeanBot",
+                    "message": follow_up_message,
+                },
+                timeout=10
+            )
+            post_response.raise_for_status()
+
+            print("[RAG] Generated and posted follow-up response")
+            log.append("[RAG] Successfully posted follow-up response")
+
+        else:
+            print("[RAG] No relevant documents found")
+
+    except Exception as e:
+        print(f"[ERROR] Failed to generate follow-up: {e}")
+        errors.append(str(e))
+
+    return {"log": log, "errors": errors}
+
+
 # =============================================================================
 # WebSocket Real-Time Mode
 # =============================================================================
@@ -1103,7 +1230,7 @@ async def run_agent_websocket():
     print(f"WebSocket URL: {ws_url}")
     print(f"Model: {OPENAI_MODEL}")
     print("=" * 60)
-    print("\nListening for new tickets... (Press Ctrl+C to stop)")
+    print("\nListening for tickets and responses... (Press Ctrl+C to stop)")
     print("-" * 60)
 
     while True:
@@ -1119,9 +1246,13 @@ async def run_agent_websocket():
 
                         print(f"\n[EVENT] {update_type}: {ticket_id}")
 
-                        # Only process newly created tickets
+                        # Process based on event type
                         if update_type == "created":
+                            # New ticket - full processing
                             process_single_ticket(ticket_id)
+                        elif update_type == "response":
+                            # Customer responded - check if we need to follow up
+                            process_customer_response(ticket_id)
                         else:
                             print(f"[SKIP] Ignoring {update_type} event")
 

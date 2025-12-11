@@ -256,15 +256,16 @@ Use the LLM to extract from ticket content:
 
 - [x] Implement async WebSocket listener for real-time ticket updates - `run_agent_websocket()`
 - [x] Handle `created` events to process new tickets immediately
+- [x] Handle `response` events to follow up when customers reply - `process_customer_response()`
 - [x] Auto-reconnect on connection loss with 5-second retry
 - [x] CLI flag `--watch` to enable real-time mode
 
 **WebSocket Events:**
 
-- `created` - New ticket submitted ✅ Handled
+- `created` - New ticket submitted ✅ Handled - full processing
+- `response` - New response on ticket ✅ Handled - generates follow-up if we asked for info
 - `updated` - Ticket fields modified (skipped)
 - `deleted` - Ticket removed (skipped)
-- `response` - New response on ticket (skipped)
 - `status` - Ticket status updated (skipped)
 
 ### 4.5 Escalation Logic ✅ IMPLEMENTED
